@@ -1,34 +1,26 @@
 # Tiny Tapeout project information
 project:
-  title:        "AWEChip v1 - 8-bit ALU Core"
+  title:        "AWEChip v2 - Unified Adaptive Workload Engine"
   author:       "ARARAT33"
   discord:      ""
-  description:  "A compact programmable 8-bit arithmetic and logic processing core for the AWE hardware architecture."
+  description:  "Compact IHP SG13G2 accelerator combining an 8-bit ALU, fixed-point MAC, waveform synthesis, programmable delay line, leaky neuron, CFAR-style detector, ROM and self-test controller."
   language:     "Verilog"
   clock_hz:     50000000
-
-  # One tile keeps the first silicon revision conservative and easy to harden.
   tiles: "1x1"
-
-  # Unique Tiny Tapeout top-level module name.
   top_module:  "tt_um_ararat33_awechip"
-
   source_files:
     - "project.v"
 
-# Pinout for the AWEChip v1 instruction interface.
 pinout:
-  # Inputs: opcode in ui[3:0]; ui[7:4] reserved for future control/version bits.
   ui[0]: "OP0"
   ui[1]: "OP1"
   ui[2]: "OP2"
   ui[3]: "OP3"
-  ui[4]: "CTRL0"
-  ui[5]: "CTRL1"
-  ui[6]: "CTRL2"
-  ui[7]: "CTRL3"
+  ui[4]: "MODE0"
+  ui[5]: "MODE1"
+  ui[6]: "MODE2"
+  ui[7]: "MODE3"
 
-  # Outputs: current 8-bit result / accumulator state.
   uo[0]: "RESULT0"
   uo[1]: "RESULT1"
   uo[2]: "RESULT2"
@@ -38,7 +30,6 @@ pinout:
   uo[6]: "RESULT6"
   uo[7]: "RESULT7"
 
-  # Bidirectional pins are used as the 8-bit operand/data input path.
   uio[0]: "DATA0"
   uio[1]: "DATA1"
   uio[2]: "DATA2"
