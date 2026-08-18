@@ -29,61 +29,61 @@ async def test_awechip_x8(dut):
     await reset(dut)
 
     # Mode 0: 64-lane SIMD fabric and reductions.
-    assert await execute(dut, 0, 0, 0x22) >= 0
-    assert await execute(dut, 0, 1) >= 0
-    assert await execute(dut, 0, 2) >= 0
-    assert await execute(dut, 0, 3) >= 0
+    await execute(dut, 0, 0, 0x22)
     assert await execute(dut, 0, 0xC) == 0x40
     assert await execute(dut, 0, 0xD) == 0x3F
     assert await execute(dut, 0, 0xE) == 0xFF
+    assert await execute(dut, 0, 1) >= 0
+    assert await execute(dut, 0, 2) >= 0
+    assert await execute(dut, 0, 3) >= 0
 
     # Mode 1: waveform/LFSR engine.
     assert await execute(dut, 1, 0, 0) == 0
-    s0 = await execute(dut, 1, 3)
-    assert s0 == 0
-    s1 = await execute(dut, 1, 1, 64)
-    assert s1 != s0
-    assert await execute(dut, 1, 5) != 0
+    assert await execute(dut, 1, 3) == 0
+    await execute(dut, 1, 1, 32)
+    s = await execute(dut, 1, 3)
+    assert s != 0
+    l = await execute(dut, 1, 5)
+    assert l != 0
 
-    # Mode 2: arithmetic/MAC and reduction outputs.
-    await execute(dut, 0, 0, 12)
-    await execute(dut, 0, 1, 10)
-    assert await execute(dut, 2, 0, 12) == (12 * 10) & 0xFF
+    # Mode 2: arithmetic operations using the global control register.
+    await execute(dut, 0, 0xB, 10)  # control = 10
+    assert await execute(dut, 2, 0, 12) == 120
     assert await execute(dut, 2, 8, 7) == 49
-    assert await execute(dut, 2, 0xA, 7) in (0, 1, 7, 12)
+    assert await execute(dut, 2, 0xA, 7) == 10
+    assert await execute(dut, 2, 0xB, 7) == 7
+    assert await execute(dut, 2, 0xC, 0xF) == (0xF & 10)
+    assert await execute(dut, 2, 0xD, 0x05) == (0x05 | 10)
+    assert await execute(dut, 2, 0xE, 0x05) == (0x05 ^ 10)
 
     # Mode 3: eight leaky integrate-and-fire neurons.
     await execute(dut, 3, 0)
     for _ in range(12):
         await execute(dut, 3, 1, 40)
-    assert await execute(dut, 3, 3) != 0 or await execute(dut, 3, 2) >= 0
+    assert await execute(dut, 3, 3) != 0
     assert await execute(dut, 3, 2) >= 0
 
     # Mode 4: programmable streaming delay memory.
     await execute(dut, 4, 1, 0)
-    old = await execute(dut, 4, 0, 0x5A)
-    assert old == 0
+    assert await execute(dut, 4, 0, 0x5A) == 0
     assert await execute(dut, 4, 2) == 0x5A
     await execute(dut, 4, 5, 0x33)
     assert await execute(dut, 4, 2) in (0x5A, 0x33)
 
     # Mode 5: CFAR-style adaptive detector.
-    await execute(dut, 5, 6, 5)
+    await execute(dut, 5, 6, 5)  # threshold offset
     for _ in range(8):
         await execute(dut, 5, 0, 10)
-    assert await execute(dut, 5, 1) >= 0
-    assert await execute(dut, 5, 2) >= 0
-    assert await execute(dut, 5, 0, 100) in (0, 0xFF)
+    assert await execute(dut, 5, 1) == 10
+    assert await execute(dut, 5, 2) == 15
+    assert await execute(dut, 5, 0, 100) == 0xFF
 
     # Mode 6: deterministic ROM/constant source.
-    # The new ROM is deliberately deterministic and addressable.
-    r0 = await execute(dut, 6, 0, 0)
-    r1 = await execute(dut, 6, 0, 1)
-    r2 = await execute(dut, 6, 0, 2)
-    assert (r0, r1, r2) == (0xA5, 0xA4, 0xA7)
+    assert await execute(dut, 6, 0, 0) == 0xA5
+    assert await execute(dut, 6, 0, 1) == 0xA4
+    assert await execute(dut, 6, 0, 2) == 0xA7
 
     # Mode 7: fabric diagnostics.
-    assert await execute(dut, 7, 0) >= 0
     assert await execute(dut, 7, 0xA) == 0x64  # 64 lanes
     assert await execute(dut, 7, 0xB) == 0x20  # 32 delay samples
     assert await execute(dut, 7, 0xC) == 0x08  # 8 neurons
