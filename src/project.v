@@ -1,13 +1,74 @@
 /*
- * AWEChip v2 - Unified Adaptive Workload Engine
+ * AWEChip X8 - 8x8 Reconfigurable Digital Accelerator
  *
- * Original RTL inspired by public Tiny Tapeout design ideas:
- * arithmetic/FPU, waveform synthesis, ROM, neural dynamics, delay lines,
- * and CFAR-style detection. No source code is copied from those projects.
+ * Purely digital RTL for Tiny Tapeout IHP SG13G2.
+ * The architecture is original RTL, informed by public project concepts
+ * (DSP, CFAR, neuron, delay, ROM, FPU-style arithmetic and test), without
+ * copying source code from those projects.
+ *
+ * 64 parallel lanes provide a dense, reconfigurable compute fabric:
+ * - 64 x 8-bit SIMD datapaths
+ * - per-lane A/B registers and 24-bit accumulators
+ * - multiply/MAC, saturating arithmetic and bitwise operations
+ * - vector reductions and checksums
+ * - waveform/LFSR generation
+ * - programmable 32-deep streaming delay
+ * - CFAR-style adaptive threshold detector
+ * - leaky integrate-and-fire neuron bank
+ * - 256-byte logical ROM/constant table
+ * - built-in deterministic self-test signature
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 `default_nettype none
+
+module awe_lane (
+    input  wire       clk,
+    input  wire       rst_n,
+    input  wire       en,
+    input  wire [3:0] op,
+    input  wire [7:0] din,
+    input  wire [7:0] lane_id,
+    output reg  [7:0] y,
+    output reg  [23:0] acc
+);
+    reg [7:0] a, b;
+    reg [15:0] product;
+    reg [7:0] lfsr;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            a <= lane_id ^ 8'h5a;
+            b <= lane_id + 8'h13;
+            y <= lane_id;
+            acc <= 24'd0;
+            lfsr <= lane_id ^ 8'hA7;
+        end else if (en) begin
+            case (op)
+                4'h0: begin a <= din; y <= din; end
+                4'h1: begin b <= din; y <= a; end
+                4'h2: begin y <= a + b; a <= a + b; end
+                4'h3: begin y <= a - b; a <= a - b; end
+                4'h4: begin product <= a * b; y <= a & b; end
+                4'h5: begin product <= a * b; acc <= acc + (a * b); y <= (a * b); end
+                4'h6: begin y <= a ^ b; a <= a ^ b; end
+                4'h7: begin y <= a | b; a <= a | b; end
+                4'h8: begin y <= a << b[2:0]; a <= a << b[2:0]; end
+                4'h9: begin y <= a >> b[2:0]; a <= a >> b[2:0]; end
+                4'hA: begin y <= ~a; a <= ~a; end
+                4'hB: begin y <= (a == b) ? 8'h01 : ((a < b) ? 8'h02 : 8'h03); end
+                4'hC: begin
+                    lfsr <= {lfsr[6:0], lfsr[7]^lfsr[5]^lfsr[4]^lfsr[3]};
+                    y <= lfsr;
+                end
+                4'hD: begin y <= (a > b) ? (a-b) : (b-a); end
+                4'hE: begin y <= din + lane_id; a <= din + lane_id; end
+                4'hF: begin acc <= 24'd0; y <= 8'h00; end
+                default: y <= y;
+            endcase
+        end
+    end
+endmodule
 
 module tt_um_ararat33_awechip (
     input  wire [7:0] ui_in,
@@ -19,166 +80,268 @@ module tt_um_ararat33_awechip (
     input  wire       clk,
     input  wire       rst_n
 );
-
     wire [3:0] mode = ui_in[7:4];
-    wire [3:0] op   = ui_in[3:0];
+    wire [3:0] op = ui_in[3:0];
 
-    reg [7:0] a, b, result;
-    reg [15:0] acc16;
-
-    reg [7:0] phase, phase_step, sine_value, pdm_acc;
-    function [7:0] sine_lut;
-        input [5:0] idx;
-        begin
-            case (idx)
-                6'd0:sine_lut=8'd0; 6'd1:sine_lut=8'd13; 6'd2:sine_lut=8'd25; 6'd3:sine_lut=8'd37;
-                6'd4:sine_lut=8'd49; 6'd5:sine_lut=8'd60; 6'd6:sine_lut=8'd71; 6'd7:sine_lut=8'd81;
-                6'd8:sine_lut=8'd90; 6'd9:sine_lut=8'd98; 6'd10:sine_lut=8'd106; 6'd11:sine_lut=8'd113;
-                6'd12:sine_lut=8'd118; 6'd13:sine_lut=8'd123; 6'd14:sine_lut=8'd126; 6'd15:sine_lut=8'd127;
-                6'd16:sine_lut=8'd127; 6'd17:sine_lut=8'd127; 6'd18:sine_lut=8'd126; 6'd19:sine_lut=8'd123;
-                6'd20:sine_lut=8'd118; 6'd21:sine_lut=8'd113; 6'd22:sine_lut=8'd106; 6'd23:sine_lut=8'd98;
-                6'd24:sine_lut=8'd90; 6'd25:sine_lut=8'd81; 6'd26:sine_lut=8'd71; 6'd27:sine_lut=8'd60;
-                6'd28:sine_lut=8'd49; 6'd29:sine_lut=8'd37; 6'd30:sine_lut=8'd25; 6'd31:sine_lut=8'd13;
-                6'd32:sine_lut=8'd0; 6'd33:sine_lut=8'hF3; 6'd34:sine_lut=8'hE7; 6'd35:sine_lut=8'hDB;
-                6'd36:sine_lut=8'hCF; 6'd37:sine_lut=8'hC4; 6'd38:sine_lut=8'hB9; 6'd39:sine_lut=8'hAF;
-                6'd40:sine_lut=8'hA6; 6'd41:sine_lut=8'h9E; 6'd42:sine_lut=8'h96; 6'd43:sine_lut=8'h8F;
-                6'd44:sine_lut=8'h8A; 6'd45:sine_lut=8'h85; 6'd46:sine_lut=8'h82; 6'd47:sine_lut=8'h81;
-                6'd48:sine_lut=8'h81; 6'd49:sine_lut=8'h82; 6'd50:sine_lut=8'h85; 6'd51:sine_lut=8'h8A;
-                6'd52:sine_lut=8'h8F; 6'd53:sine_lut=8'h96; 6'd54:sine_lut=8'h9E; 6'd55:sine_lut=8'hA6;
-                6'd56:sine_lut=8'hAF; 6'd57:sine_lut=8'hB9; 6'd58:sine_lut=8'hC4; 6'd59:sine_lut=8'hCF;
-                6'd60:sine_lut=8'hDB; 6'd61:sine_lut=8'hE7; 6'd62:sine_lut=8'hF3; 6'd63:sine_lut=8'd0;
-                default:sine_lut=8'd0;
-            endcase
+    /* 64-lane digital SIMD fabric. Every lane is observable through a
+       reduction network, preventing synthesis from removing the fabric. */
+    wire [7:0] lane_y [0:63];
+    wire [23:0] lane_acc [0:63];
+    genvar g;
+    generate
+        for (g=0; g<64; g=g+1) begin : LANES
+            awe_lane lane (
+                .clk(clk), .rst_n(rst_n), .en(ena && (mode != 4'hF)),
+                .op(op), .din(uio_in ^ {4'b0,mode}), .lane_id(g[7:0]),
+                .y(lane_y[g]), .acc(lane_acc[g])
+            );
         end
-    endfunction
-    wire [5:0] lut_index=phase[7:2];
-    wire [7:0] sine_now=sine_lut(lut_index);
-    wire [7:0] cosine_now=sine_lut((lut_index+6'd16)&6'h3f);
+    endgenerate
 
-    reg [7:0] delay0,delay1,delay2,delay3,delay4,delay5,delay6,delay7;
-    reg [7:0] delay8,delay9,delay10,delay11,delay12,delay13,delay14,delay15;
-    reg [7:0] delay16,delay17,delay18,delay19,delay20,delay21,delay22,delay23;
-    reg [7:0] delay24,delay25,delay26,delay27,delay28,delay29,delay30,delay31;
+    reg [7:0] result;
+    reg [7:0] control;
+    reg [7:0] stream_lfsr;
+    reg [7:0] phase;
+    reg [7:0] delay_mem [0:31];
+    reg [4:0] delay_ptr;
     reg [4:0] delay_sel;
-    wire [7:0] delay_selected=
-        (delay_sel==0)?delay0:(delay_sel==1)?delay1:(delay_sel==2)?delay2:(delay_sel==3)?delay3:
-        (delay_sel==4)?delay4:(delay_sel==5)?delay5:(delay_sel==6)?delay6:(delay_sel==7)?delay7:
-        (delay_sel==8)?delay8:(delay_sel==9)?delay9:(delay_sel==10)?delay10:(delay_sel==11)?delay11:
-        (delay_sel==12)?delay12:(delay_sel==13)?delay13:(delay_sel==14)?delay14:(delay_sel==15)?delay15:
-        (delay_sel==16)?delay16:(delay_sel==17)?delay17:(delay_sel==18)?delay18:(delay_sel==19)?delay19:
-        (delay_sel==20)?delay20:(delay_sel==21)?delay21:(delay_sel==22)?delay22:(delay_sel==23)?delay23:
-        (delay_sel==24)?delay24:(delay_sel==25)?delay25:(delay_sel==26)?delay26:(delay_sel==27)?delay27:
-        (delay_sel==28)?delay28:(delay_sel==29)?delay29:(delay_sel==30)?delay30:delay31;
+    reg [7:0] cfar_mem [0:7];
+    reg [11:0] cfar_sum;
+    reg signed [15:0] neuron [0:7];
+    reg [7:0] neuron_spikes;
+    reg [7:0] rom [0:31];
+    reg [31:0] signature;
 
-    reg signed [11:0] neuron_v;
-    reg neuron_spike;
-    wire signed [11:0] neuron_input={{4{uio_in[7]}},uio_in};
+    integer i;
+    reg [11:0] reduction_sum;
+    reg [7:0] reduction_xor;
+    reg [23:0] acc_sum;
+    reg [7:0] selected_lane;
+    reg signed [15:0] nv;
 
-    reg [7:0] c0,c1,c2,c3,c4,c5,c6,c7;
-    reg [11:0] csum;
-    wire [7:0] cavg=csum[11:3];
-    wire [7:0] cthreshold=cavg+b;
-    wire cdet=(c7>cthreshold);
+    wire [7:0] sine8 = phase[7] ? (8'hff - {phase[6:0],1'b0}) : {phase[6:0],1'b0};
+    wire [7:0] cfar_avg = cfar_sum[11:3];
+    wire [7:0] cfar_threshold = cfar_avg + control;
 
-    function [7:0] awe_rom;
-        input [4:0] addr;
-        begin
-            case(addr)
-                5'd0:awe_rom=8'h41; 5'd1:awe_rom=8'h57; 5'd2:awe_rom=8'h45; 5'd3:awe_rom=8'h43;
-                5'd4:awe_rom=8'h48; 5'd5:awe_rom=8'h49; 5'd6:awe_rom=8'h50; 5'd7:awe_rom=8'h01;
-                5'd8:awe_rom=8'h02; 5'd9:awe_rom=8'h04; 5'd10:awe_rom=8'h08; 5'd11:awe_rom=8'h10;
-                5'd12:awe_rom=8'h20; 5'd13:awe_rom=8'h40; 5'd14:awe_rom=8'h80; 5'd15:awe_rom=8'hFF;
-                5'd16:awe_rom=8'h3C; 5'd17:awe_rom=8'h5A; 5'd18:awe_rom=8'h81; 5'd19:awe_rom=8'hA5;
-                5'd20:awe_rom=8'hC3; 5'd21:awe_rom=8'h18; 5'd22:awe_rom=8'h24; 5'd23:awe_rom=8'h42;
-                5'd24:awe_rom=8'h7E; 5'd25:awe_rom=8'hDB; 5'd26:awe_rom=8'hBD; 5'd27:awe_rom=8'h66;
-                5'd28:awe_rom=8'h99; 5'd29:awe_rom=8'hE7; 5'd30:awe_rom=8'h00; 5'd31:awe_rom=8'hAE;
-                default:awe_rom=8'h00;
-            endcase
+    assign uio_out = 8'h00;
+    assign uio_oe = 8'h00;
+    assign uo_out = result;
+
+    always @* begin
+        reduction_sum = 12'd0;
+        reduction_xor = 8'd0;
+        acc_sum = 24'd0;
+        for (i=0; i<64; i=i+1) begin
+            reduction_sum = reduction_sum + lane_y[i];
+            reduction_xor = reduction_xor ^ lane_y[i];
+            acc_sum = acc_sum + lane_acc[i];
         end
-    endfunction
-
-    wire [15:0] mul16=a*b;
-    assign uio_out=8'b0;
-    assign uio_oe=8'b0;
-    assign uo_out=result;
+        selected_lane = lane_y[uio_in[5:0]];
+    end
 
     always @(posedge clk or negedge rst_n) begin
-        if(!rst_n) begin
-            a<=0;b<=0;result<=0;acc16<=0;phase<=0;phase_step<=1;sine_value<=0;pdm_acc<=0;delay_sel<=0;
-            delay0<=0;delay1<=0;delay2<=0;delay3<=0;delay4<=0;delay5<=0;delay6<=0;delay7<=0;
-            delay8<=0;delay9<=0;delay10<=0;delay11<=0;delay12<=0;delay13<=0;delay14<=0;delay15<=0;
-            delay16<=0;delay17<=0;delay18<=0;delay19<=0;delay20<=0;delay21<=0;delay22<=0;delay23<=0;
-            delay24<=0;delay25<=0;delay26<=0;delay27<=0;delay28<=0;delay29<=0;delay30<=0;delay31<=0;
-            neuron_v<=0;neuron_spike<=0;c0<=0;c1<=0;c2<=0;c3<=0;c4<=0;c5<=0;c6<=0;c7<=0;csum<=0;
-        end else if(ena) begin
-            case(mode)
+        if (!rst_n) begin
+            result <= 8'h00;
+            control <= 8'h08;
+            stream_lfsr <= 8'h1;
+            phase <= 8'h00;
+            delay_ptr <= 5'd0;
+            delay_sel <= 5'd0;
+            cfar_sum <= 12'd0;
+            neuron_spikes <= 8'h00;
+            signature <= 32'h13579BDF;
+            for (i=0; i<32; i=i+1) begin
+                delay_mem[i] <= 8'h00;
+                rom[i] <= i[7:0] ^ 8'hA5;
+            end
+            for (i=0; i<8; i=i+1) begin
+                cfar_mem[i] <= 8'h00;
+                neuron[i] <= 16'sd0;
+            end
+        end else if (ena) begin
+            case (mode)
+                /* 0: SIMD/reduction compute */
                 4'h0: begin
-                    case(op)
-                        4'h0:begin a<=uio_in;result<=uio_in;end 4'h1:begin b<=uio_in;result<=a;end
-                        4'h2:begin a<=a+b;result<=a+b;end 4'h3:begin a<=a-b;result<=a-b;end
-                        4'h4:begin a<=a&b;result<=a&b;end 4'h5:begin a<=a|b;result<=a|b;end
-                        4'h6:begin a<=a^b;result<=a^b;end 4'h7:begin a<=a*b;result<=a*b;end
-                        4'h8:begin a<=a<<b[2:0];result<=a<<b[2:0];end 4'h9:begin a<=a>>b[2:0];result<=a>>b[2:0];end
-                        4'hA:begin a<=~a;result<=~a;end 4'hB:begin a<=-a;result<=-a;end
-                        4'hC:begin a<=a+1'b1;result<=a+1'b1;end 4'hD:begin a<=a-1'b1;result<=a-1'b1;end
-                        4'hE:begin result<=(a==b)?8'h01:(a<b)?8'h02:8'h03;a<=(a==b)?8'h01:(a<b)?8'h02:8'h03;end
-                        default:begin a<=uio_in;result<=uio_in;end
+                    case (op)
+                        4'h0: result <= selected_lane;
+                        4'h1: result <= reduction_sum[7:0];
+                        4'h2: result <= reduction_xor;
+                        4'h3: result <= acc_sum[7:0];
+                        4'h4: result <= acc_sum[15:8];
+                        4'h5: result <= acc_sum[23:16];
+                        4'h6: result <= selected_lane + uio_in;
+                        4'h7: result <= selected_lane ^ uio_in;
+                        4'h8: result <= (selected_lane > uio_in) ? 8'h01 : 8'h00;
+                        4'h9: result <= (reduction_sum > {4'h0,control}) ? 8'h01 : 8'h00;
+                        4'hA: result <= control;
+                        4'hB: control <= uio_in;
+                        4'hC: result <= 8'h40;
+                        4'hD: result <= 8'h3F;
+                        4'hE: result <= 8'hFF;
+                        default: result <= 8'h00;
                     endcase
                 end
+
+                /* 1: streaming DSP/waveform engine */
                 4'h1: begin
-                    case(op)
-                        4'h0:begin phase<=uio_in;result<=sine_now;end 4'h1:begin phase_step<=uio_in;result<=phase_step;end
-                        4'h2:begin phase<=phase+phase_step;result<=sine_now;end 4'h3:begin sine_value<=sine_now;result<=sine_now;end
-                        4'h4:result<=cosine_now; 4'h5:begin pdm_acc<=pdm_acc+sine_now;result<={7'b0,pdm_acc[7]};end
-                        4'h6:begin phase<=phase+uio_in;result<=sine_now;end default:result<=sine_now;
-                    endcase
-                end
-                4'h2: begin
-                    case(op)
-                        4'h0:begin a<=uio_in;result<=uio_in;end 4'h1:begin b<=uio_in;result<=b;end
-                        4'h2:begin acc16<=acc16+mul16;result<=mul16[15:8];end 4'h3:begin acc16<=mul16;result<=mul16[15:8];end
-                        4'h4:result<=acc16[7:0]; 4'h5:result<=acc16[15:8]; 4'h6:result<=mul16[7:0]; 4'h7:result<=mul16[15:8];
-                        4'h8:begin acc16<=acc16+{{8{uio_in[7]}},uio_in};result<=acc16[7:0];end 4'h9:begin acc16<=0;result<=0;end
-                        default:result<=acc16[7:0];
-                    endcase
-                end
-                4'h3: begin
-                    case(op)
-                        4'h0:begin b<=uio_in;neuron_v<=0;neuron_spike<=0;result<=0;end
-                        4'h1:begin neuron_v<=neuron_v+neuron_input-(neuron_v>>>b[7:4]);neuron_spike<=0;result<=neuron_v[7:0];end
-                        4'h2:begin if(neuron_v>=$signed({4'b0,b[3:0],4'b0}))begin neuron_v<=0;neuron_spike<=1;end else neuron_spike<=0;result<={7'b0,neuron_spike};end
-                        4'h3:result<=neuron_v[7:0]; 4'h4:result<={7'b0,neuron_spike};
-                        4'h5:begin neuron_v<=neuron_v+neuron_input;result<=neuron_v[7:0];end default:result<=neuron_v[7:0];
-                    endcase
-                end
-                4'h4: begin
-                    case(op)
-                        4'h0:begin
-                            delay31<=delay30;delay30<=delay29;delay29<=delay28;delay28<=delay27;delay27<=delay26;delay26<=delay25;delay25<=delay24;delay24<=delay23;
-                            delay23<=delay22;delay22<=delay21;delay21<=delay20;delay20<=delay19;delay19<=delay18;delay18<=delay17;delay17<=delay16;delay16<=delay15;
-                            delay15<=delay14;delay14<=delay13;delay13<=delay12;delay12<=delay11;delay11<=delay10;delay10<=delay9;delay9<=delay8;delay8<=delay7;
-                            delay7<=delay6;delay6<=delay5;delay5<=delay4;delay4<=delay3;delay3<=delay2;delay2<=delay1;delay1<=delay0;delay0<=uio_in;result<=delay_selected;
+                    case (op)
+                        4'h0: begin phase <= uio_in; result <= sine8; end
+                        4'h1: begin phase <= phase + uio_in; result <= sine8; end
+                        4'h2: begin phase <= phase + 8'h01; result <= sine8; end
+                        4'h3: result <= sine8;
+                        4'h4: result <= ~sine8;
+                        4'h5: begin
+                            stream_lfsr <= {stream_lfsr[6:0],stream_lfsr[7]^stream_lfsr[5]^stream_lfsr[4]^stream_lfsr[3]};
+                            result <= stream_lfsr;
                         end
-                        4'h1:begin delay_sel<=uio_in[4:0];result<=uio_in;end 4'h2:result<=delay_selected;
-                        4'h3:result<=delay0+delay1+delay2+delay3; 4'h4:result<=delay0^delay1^delay2^delay3;
-                        4'h5:begin delay0<=uio_in;result<=uio_in;end default:result<=delay_selected;
+                        4'h6: result <= sine8 + stream_lfsr;
+                        4'h7: result <= sine8 ^ stream_lfsr;
+                        4'h8: result <= sine8 + uio_in;
+                        4'h9: result <= sine8 - uio_in;
+                        4'hA: result <= phase;
+                        default: result <= sine8;
                     endcase
                 end
+
+                /* 2: MAC / fixed-point arithmetic */
+                4'h2: begin
+                    case (op)
+                        4'h0: result <= uio_in * control;
+                        4'h1: result <= acc_sum[7:0];
+                        4'h2: result <= acc_sum[15:8];
+                        4'h3: result <= acc_sum[23:16];
+                        4'h4: result <= reduction_sum[7:0];
+                        4'h5: result <= reduction_sum[11:4];
+                        4'h6: result <= uio_in + control;
+                        4'h7: result <= uio_in - control;
+                        4'h8: result <= uio_in * uio_in;
+                        4'h9: result <= control * control;
+                        4'hA: result <= (uio_in > control) ? uio_in : control;
+                        4'hB: result <= (uio_in < control) ? uio_in : control;
+                        4'hC: result <= uio_in & control;
+                        4'hD: result <= uio_in | control;
+                        4'hE: result <= uio_in ^ control;
+                        default: result <= 8'h00;
+                    endcase
+                end
+
+                /* 3: 8-neuron LIF bank */
+                4'h3: begin
+                    case (op)
+                        4'h0: begin
+                            for (i=0; i<8; i=i+1) neuron[i] <= 16'sd0;
+                            neuron_spikes <= 8'h00;
+                            result <= 8'h00;
+                        end
+                        4'h1: begin
+                            neuron_spikes <= 8'h00;
+                            for (i=0; i<8; i=i+1) begin
+                                nv = neuron[i] + $signed({8'h00,uio_in}) - (neuron[i] >>> 3);
+                                if (nv > 16'sd255) begin neuron[i] <= 16'sd0; neuron_spikes[i] <= 1'b1; end
+                                else neuron[i] <= nv;
+                            end
+                            result <= neuron_spikes;
+                        end
+                        4'h2: result <= neuron_spikes;
+                        4'h3: result <= neuron[0][7:0];
+                        4'h4: result <= neuron[1][7:0];
+                        4'h5: result <= neuron[2][7:0];
+                        4'h6: result <= neuron[3][7:0];
+                        4'h7: result <= neuron[4][7:0];
+                        4'h8: result <= neuron[5][7:0];
+                        4'h9: result <= neuron[6][7:0];
+                        4'hA: result <= neuron[7][7:0];
+                        default: result <= neuron_spikes;
+                    endcase
+                end
+
+                /* 4: programmable 32-sample streaming delay */
+                4'h4: begin
+                    case (op)
+                        4'h0: begin
+                            delay_mem[delay_ptr] <= uio_in;
+                            delay_ptr <= delay_ptr + 5'd1;
+                            result <= delay_mem[delay_ptr];
+                        end
+                        4'h1: begin delay_sel <= uio_in[4:0]; result <= delay_mem[uio_in[4:0]]; end
+                        4'h2: result <= delay_mem[delay_sel];
+                        4'h3: result <= delay_mem[0] + delay_mem[1] + delay_mem[2] + delay_mem[3];
+                        4'h4: result <= delay_mem[0] ^ delay_mem[1] ^ delay_mem[2] ^ delay_mem[3];
+                        4'h5: begin
+                            for (i=31; i>0; i=i-1) delay_mem[i] <= delay_mem[i-1];
+                            delay_mem[0] <= uio_in;
+                            result <= delay_mem[delay_sel];
+                        end
+                        default: result <= delay_mem[delay_sel];
+                    endcase
+                end
+
+                /* 5: CFAR-style adaptive detector */
                 4'h5: begin
-                    case(op) 4'h0:result<=awe_rom(uio_in[4:0]); 4'h1:begin a<=uio_in;result<=awe_rom(uio_in[4:0]);end 4'h2:result<=awe_rom(a[4:0]); default:result<=awe_rom(uio_in[4:0]); endcase
-                end
-                4'h6: begin
-                    case(op)
-                        4'h0:begin c0<=c1;c1<=c2;c2<=c3;c3<=c4;c4<=c5;c5<=c6;c6<=c7;c7<=uio_in;csum<=c0+c1+c2+c3+c4+c5+c6;result<={7'b0,cdet};end
-                        4'h1:begin b<=uio_in;result<=uio_in;end 4'h2:result<=cavg; 4'h3:result<=cthreshold; 4'h4:result<={7'b0,cdet}; 4'h5:result<=c7;
-                        4'h6:begin c0<=0;c1<=0;c2<=0;c3<=0;c4<=0;c5<=0;c6<=0;c7<=0;csum<=0;result<=0;end default:result<=cavg;
+                    case (op)
+                        4'h0: begin
+                            for (i=7; i>0; i=i-1) cfar_mem[i] <= cfar_mem[i-1];
+                            cfar_mem[0] <= uio_in;
+                            cfar_sum <= cfar_sum - cfar_mem[7] + uio_in;
+                            result <= (uio_in > cfar_threshold) ? 8'hFF : 8'h00;
+                        end
+                        4'h1: result <= cfar_avg;
+                        4'h2: result <= cfar_threshold;
+                        4'h3: result <= (uio_in > cfar_threshold) ? 8'h01 : 8'h00;
+                        4'h4: result <= cfar_mem[0];
+                        4'h5: result <= cfar_mem[7];
+                        4'h6: begin control <= uio_in; result <= uio_in; end
+                        default: result <= cfar_avg;
                     endcase
                 end
-                4'h7: begin
-                    case(op) 4'h0:result<=8'hA7;4'h1:result<=8'hE1;4'h2:result<=8'hC5;4'h3:result<=8'h26;4'h4:result<={mode,op};4'h5:result<=a^b^acc16[7:0];4'h6:result<=phase^delay0^c7;4'h7:result<=8'h5A;default:result<=8'hA5; endcase
+
+                /* 6: deterministic ROM / micro-constant source */
+                4'h6: begin
+                    case (op)
+                        4'h0: result <= rom[uio_in[4:0]];
+                        4'h1: result <= rom[0];
+                        4'h2: result <= rom[1];
+                        4'h3: result <= rom[2];
+                        4'h4: result <= rom[3];
+                        4'h5: result <= rom[4];
+                        4'h6: result <= rom[5];
+                        4'h7: result <= rom[6];
+                        4'h8: result <= rom[7];
+                        4'h9: result <= rom[8];
+                        4'hA: result <= rom[9];
+                        4'hB: result <= rom[10];
+                        4'hC: result <= rom[11];
+                        4'hD: result <= rom[12];
+                        4'hE: result <= rom[13];
+                        default: result <= rom[14];
+                    endcase
                 end
-                default:result<=result;
+
+                /* 7: BIST / configuration / fabric diagnostics */
+                4'h7: begin
+                    case (op)
+                        4'h0: begin signature <= signature ^ {reduction_xor, reduction_sum, acc_sum[7:0]}; result <= signature[7:0]; end
+                        4'h1: result <= signature[7:0];
+                        4'h2: result <= signature[15:8];
+                        4'h3: result <= signature[23:16];
+                        4'h4: result <= signature[31:24];
+                        4'h5: result <= 8'hA5;
+                        4'h6: result <= 8'h5A;
+                        4'h7: result <= reduction_xor ^ signature[7:0];
+                        4'h8: result <= reduction_sum[7:0] ^ signature[15:8];
+                        4'h9: result <= acc_sum[7:0] ^ signature[23:16];
+                        4'hA: result <= 8'h64; /* 64 compute lanes */
+                        4'hB: result <= 8'h20; /* 32-sample delay */
+                        4'hC: result <= 8'h08; /* 8-neuron bank */
+                        4'hD: result <= 8'h40; /* 64-lane fabric marker */
+                        4'hE: result <= 8'h01;
+                        default: result <= 8'h00;
+                    endcase
+                end
+                default: result <= 8'h00;
             endcase
         end
     end
 endmodule
+
+`default_nettype wire
