@@ -1,12 +1,12 @@
 # Tiny Tapeout project information
 project:
-  title:        "AWEChip v2 - Unified Adaptive Workload Engine"
+  title:        "AWEChip X8 - 64-Lane Reconfigurable Digital Accelerator"
   author:       "ARARAT33"
   discord:      ""
-  description:  "Compact IHP SG13G2 accelerator combining an 8-bit ALU, fixed-point MAC, waveform synthesis, programmable delay line, leaky neuron, CFAR-style detector, ROM and self-test controller."
+  description:  "8x8-tile digital IHP SG13G2 accelerator with 64 parallel 8-bit SIMD lanes, per-lane MAC accumulators, DSP waveform/LFSR engine, 32-sample delay, CFAR-style detector, 8-neuron LIF bank, ROM constants and deterministic BIST."
   language:     "Verilog"
   clock_hz:     50000000
-  tiles: "1x1"
+  tiles: "8x8"
   top_module:  "tt_um_ararat33_awechip"
   source_files:
     - "project.v"
